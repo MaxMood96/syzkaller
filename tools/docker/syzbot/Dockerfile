@@ -6,7 +6,7 @@
 # docker push gcr.io/syzkaller/syzbot
 # docker run -it gcr.io/syzkaller/syzbot
 
-FROM debian:bullseye
+FROM debian:11.5
 
 RUN apt-get update --allow-releaseinfo-change
 RUN DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
