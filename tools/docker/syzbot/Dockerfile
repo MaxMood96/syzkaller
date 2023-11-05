@@ -3,7 +3,7 @@
 
 # See /tools/docker/README.md for details.
 
-FROM debian:bullseye
+FROM debian:11.2
 
 RUN apt-get update --allow-releaseinfo-change
 RUN DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
