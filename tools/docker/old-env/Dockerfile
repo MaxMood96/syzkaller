@@ -3,7 +3,7 @@
 
 # See /tools/docker/README.md for details.
 
-FROM ubuntu:16.04
+FROM ubuntu:xenial-20210114
 
 LABEL homepage="https://github.com/google/syzkaller"
 
