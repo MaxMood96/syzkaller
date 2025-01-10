@@ -6,11 +6,13 @@ package testenv
 
 import (
 	"context"
+	"flag"
 	"os"
 	"os/exec"
 	"reflect"
 	"runtime"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -19,11 +21,60 @@ import (
 // using os.StartProcess or (more commonly) exec.Command.
 func HasExec() bool {
 	switch runtime.GOOS {
-	case "js", "ios":
-		return false
+	case "aix",
+		"android",
+		"darwin",
+		"dragonfly",
+		"freebsd",
+		"illumos",
+		"linux",
+		"netbsd",
+		"openbsd",
+		"plan9",
+		"solaris",
+		"windows":
+		// Known OS that isn't ios or wasm; assume that exec works.
+		return true
+
+	case "ios", "js", "wasip1":
+		// ios has an exec syscall but on real iOS devices it might return a
+		// permission error. In an emulated environment (such as a Corellium host)
+		// it might succeed, so try it and find out.
+		//
+		// As of 2023-04-19 wasip1 and js don't have exec syscalls at all, but we
+		// may as well use the same path so that this branch can be tested without
+		// an ios environment.
+		fallthrough
+
+	default:
+		tryExecOnce.Do(func() {
+			exe, err := os.Executable()
+			if err != nil {
+				return
+			}
+			if flag.Lookup("test.list") == nil {
+				// We found the executable, but we don't know how to run it in a way
+				// that should succeed without side-effects. Just forget it.
+				return
+			}
+			// We know that a test executable exists and can run, because we're
+			// running it now. Use it to check for overall exec support, but be sure
+			// to remove any environment variables that might trigger non-default
+			// behavior in a custom TestMain.
+			cmd := exec.Command(exe, "-test.list=^$")
+			cmd.Env = []string{}
+			if err := cmd.Run(); err == nil {
+				tryExecOk = true
+			}
+		})
+		return tryExecOk
 	}
-	return true
 }
+
+var (
+	tryExecOnce sync.Once
+	tryExecOk   bool
+)
 
 // NeedsExec checks that the current system can start new processes
 // using os.StartProcess or (more commonly) exec.Command.
@@ -41,8 +92,7 @@ func NeedsExec(t testing.TB) {
 //     for an arbitrary grace period before the test's deadline expires,
 //   - if Cmd has the Cancel field, fails the test if the command is canceled
 //     due to the test's deadline, and
-//   - if supported, sets a Cleanup function that verifies that the test did not
-//     leak a subprocess.
+//   - sets a Cleanup function that verifies that the test did not leak a subprocess.
 func CommandContext(t testing.TB, ctx context.Context, name string, args ...string) *exec.Cmd {
 	t.Helper()
 	NeedsExec(t)
@@ -75,8 +125,8 @@ func CommandContext(t testing.TB, ctx context.Context, name string, args ...stri
 		// grace periods to clean up: one for the delay between the first
 		// termination signal being sent (via the Cancel callback when the Context
 		// expires) and the process being forcibly terminated (via the WaitDelay
-		// field), and a second one for the delay becween the process being
-		// terminated and and the test logging its output for debugging.
+		// field), and a second one for the delay between the process being
+		// terminated and the test logging its output for debugging.
 		//
 		// (We want to ensure that the test process itself has enough time to
 		// log the output before it is also terminated.)
@@ -122,21 +172,14 @@ func CommandContext(t testing.TB, ctx context.Context, name string, args ...stri
 		rWaitDelay.Set(reflect.ValueOf(gracePeriod))
 	}
 
-	// t.Cleanup was added in Go 1.14; for earlier Go versions,
-	// we just let the Context leak.
-	type Cleanupper interface {
-		Cleanup(func())
-	}
-	if ct, ok := t.(Cleanupper); ok {
-		ct.Cleanup(func() {
-			if cancelCtx != nil {
-				cancelCtx()
-			}
-			if cmd.Process != nil && cmd.ProcessState == nil {
-				t.Errorf("command was started, but test did not wait for it to complete: %v", cmd)
-			}
-		})
-	}
+	t.Cleanup(func() {
+		if cancelCtx != nil {
+			cancelCtx()
+		}
+		if cmd.Process != nil && cmd.ProcessState == nil {
+			t.Errorf("command was started, but test did not wait for it to complete: %v", cmd)
+		}
+	})
 
 	return cmd
 }

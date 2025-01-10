@@ -25,7 +25,10 @@ import (
 var vmctlStatusRegex = regexp.MustCompile(`^\s+([0-9]+)\b.*\brunning`)
 
 func init() {
-	vmimpl.Register("vmm", ctor, true)
+	vmimpl.Register("vmm", vmimpl.Type{
+		Ctor:       ctor,
+		Overcommit: true,
+	})
 }
 
 type Config struct {
@@ -66,14 +69,10 @@ func ctor(env *vmimpl.Env) (vmimpl.Pool, error) {
 	}
 
 	if err := config.LoadData(env.Config, cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse vmm vm config: %v", err)
+		return nil, fmt.Errorf("failed to parse vmm vm config: %w", err)
 	}
 	if cfg.Count < 1 || cfg.Count > 128 {
 		return nil, fmt.Errorf("invalid config param count: %v, want [1-128]", cfg.Count)
-	}
-	if env.Debug && cfg.Count > 1 {
-		log.Logf(0, "limiting number of VMs from %v to 1 in debug mode", cfg.Count)
-		cfg.Count = 1
 	}
 	if cfg.Mem < 128 || cfg.Mem > 1048576 {
 		return nil, fmt.Errorf("invalid config param mem: %v, want [128-1048576]", cfg.Mem)
@@ -187,7 +186,7 @@ func (inst *instance) Boot() error {
 	}
 
 	if err := vmimpl.WaitForSSH(inst.debug, 20*time.Minute, inst.sshhost,
-		inst.sshkey, inst.sshuser, inst.os, inst.sshport, nil); err != nil {
+		inst.sshkey, inst.sshuser, inst.os, inst.sshport, nil, false); err != nil {
 		out := <-inst.merger.Output
 		return vmimpl.BootError{Title: err.Error(), Output: out}
 	}
@@ -216,7 +215,7 @@ func (inst *instance) lookupSSHAddress() (string, error) {
 	return fmt.Sprintf("100.64.%s.3", matches[1]), nil
 }
 
-func (inst *instance) Close() {
+func (inst *instance) Close() error {
 	inst.vmctl("stop", "-f", inst.vmName)
 	if inst.consolew != nil {
 		inst.consolew.Close()
@@ -226,6 +225,7 @@ func (inst *instance) Close() {
 		inst.vmm.Wait()
 	}
 	inst.merger.Wait()
+	return nil
 }
 
 func (inst *instance) Forward(port int) (string, error) {
@@ -239,7 +239,7 @@ func (inst *instance) Forward(port int) (string, error) {
 
 func (inst *instance) Copy(hostSrc string) (string, error) {
 	vmDst := filepath.Join("/root", filepath.Base(hostSrc))
-	args := append(vmimpl.SCPArgs(inst.debug, inst.sshkey, inst.sshport),
+	args := append(vmimpl.SCPArgs(inst.debug, inst.sshkey, inst.sshport, false),
 		hostSrc, inst.sshuser+"@"+inst.sshhost+":"+vmDst)
 	if inst.debug {
 		log.Logf(0, "running command: scp %#v", args)
@@ -259,7 +259,7 @@ func (inst *instance) Run(timeout time.Duration, stop <-chan bool, command strin
 	}
 	inst.merger.Add("ssh", rpipe)
 
-	args := append(vmimpl.SSHArgs(inst.debug, inst.sshkey, inst.sshport),
+	args := append(vmimpl.SSHArgs(inst.debug, inst.sshkey, inst.sshport, false),
 		inst.sshuser+"@"+inst.sshhost, command)
 	if inst.debug {
 		log.Logf(0, "running command: ssh %#v", args)

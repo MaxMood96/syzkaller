@@ -1,6 +1,10 @@
 // Copyright 2021 syzkaller project authors. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
+// TODO: switch syz-verifier to use syz-fuzzer.
+
+//go:build ignore
+
 package main
 
 import (
@@ -171,7 +175,7 @@ func TestCompareResults(t *testing.T) {
 			}
 			got := CompareResults(test.res, prog)
 			if diff := cmp.Diff(test.wantReport, got); diff != "" {
-				t.Errorf("Verify report mismatch (-want +got):\n%s", diff)
+				t.Errorf("verify report mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}

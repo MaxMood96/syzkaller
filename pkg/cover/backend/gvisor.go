@@ -10,12 +10,13 @@ import (
 	"regexp"
 	"strconv"
 
-	"github.com/google/syzkaller/pkg/host"
 	"github.com/google/syzkaller/pkg/osutil"
+	"github.com/google/syzkaller/pkg/vminfo"
 	"github.com/google/syzkaller/sys/targets"
 )
 
-func makeGvisor(target *targets.Target, objDir, srcDir, buildDir string, modules []host.KernelModule) (*Impl, error) {
+func makeGvisor(target *targets.Target, objDir, srcDir, buildDir string, modules []*vminfo.KernelModule) (*Impl,
+	error) {
 	if len(modules) != 0 {
 		return nil, fmt.Errorf("gvisor coverage does not support modules")
 	}
@@ -49,9 +50,6 @@ func makeGvisor(target *targets.Target, objDir, srcDir, buildDir string, modules
 	impl := &Impl{
 		Units:  units,
 		Frames: frames,
-		RestorePC: func(pc uint32) uint64 {
-			return uint64(pc)
-		},
 	}
 	return impl, nil
 }
@@ -111,7 +109,7 @@ func gvisorParseLine(s *bufio.Scanner) (Frame, error) {
 	for i := range ints {
 		x, err := strconv.ParseUint(match[i+3], 0, 32)
 		if err != nil {
-			return Frame{}, fmt.Errorf("failed to parse number %q: %v", match[i+3], err)
+			return Frame{}, fmt.Errorf("failed to parse number %q: %w", match[i+3], err)
 		}
 		ints[i] = int(x)
 	}

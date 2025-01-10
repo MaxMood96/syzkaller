@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"testing"
+
+	"github.com/google/syzkaller/pkg/tool"
 )
 
 /* some comment */ // want "Use C-style comments // instead of /* */"
@@ -85,6 +88,9 @@ func logErrorMessages() {
 	fmt.Printf("fragment")
 	fmt.Printf("Fragment Fragment %s", msg)
 	fmt.Fprintf(nil, "These can be anything")
+	tool.Fail(err)
+	tool.Failf("good message")
+	tool.Failf("good message %v", 0)
 
 	fmt.Errorf("Bad message")                                           // want "Don't start log/error messages with a Capital letter"
 	log.Fatalf("Bad message %v", 1)                                     // want "Don't start log/error messages with a Capital letter"
@@ -98,6 +104,15 @@ func logErrorMessages() {
 	fmt.Fprintf(os.Stderr, "Real output message with capital letter\n") // want "Don't start log/error messages with a Capital letter"
 	fmt.Fprintf(os.Stderr, "real output message without newline")       // want "Add \\\\n at the end of printed messages"
 	fmt.Fprintf(os.Stderr, "%v", err)                                   // want "Add \\\\n at the end of printed messages"
+	tool.Failf("Bad message")                                           // want "Don't start log/error messages with a Capital letter"
+}
+
+func testMessages(t *testing.T) {
+	t.Logf("good message %v", 1)
+	t.Logf("Bad message %v", 1)     // want "Don't start log/error messages with a Capital letter"
+	t.Errorf("bad message %v\n", 1) // want "Don't use \\\\n at the end of log/error messages"
+	t.Fatalf("Bad message %v", 1)   // want "Don't start log/error messages with a Capital letter"
+	t.Fatalf("PublicFunc is ok %v", 1)
 }
 
 func varDecls() {

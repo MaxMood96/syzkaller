@@ -7,6 +7,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -19,7 +20,7 @@ import (
 	"github.com/google/syzkaller/pkg/tool"
 )
 
-// nolint: gocyclo, gocognit, funlen
+// nolint: gocyclo, gocognit, funlen, dupl
 func main() {
 	if len(os.Args) != 2 {
 		tool.Failf("usage: gen instructions.txt")
@@ -113,8 +114,9 @@ func main() {
 			insn1 = new(x86.Insn)
 			*insn1 = *insn
 			if err := parsePattern(insn1, vals); err != nil {
-				if _, ok := err.(errSkip); !ok {
-					reportError(err.Error())
+				var errSkip errSkip
+				if !errors.As(err, &errSkip) {
+					reportError(errSkip.Error())
 				}
 				if err.Error() != "" {
 					fmt.Fprintf(os.Stderr, "skipping %v on line %v (%v)\n", insn.Name, i, err)
@@ -127,8 +129,9 @@ func main() {
 				break
 			}
 			if err := parseOperands(insn1, vals); err != nil {
-				if _, ok := err.(errSkip); !ok {
-					reportError(err.Error())
+				var errSkip errSkip
+				if !errors.As(err, &errSkip) {
+					reportError(errSkip.Error())
 				}
 				if err.Error() != "" {
 					fmt.Fprintf(os.Stderr, "skipping %v on line %v (%v)\n", insn.Name, i, err)
@@ -245,21 +248,21 @@ func parsePattern(insn *x86.Insn, vals []string) error {
 			insn.Modrm = true
 			vv, err := parseModrm(v[3:])
 			if err != nil {
-				return fmt.Errorf("failed to parse %v: %v", v, err)
+				return fmt.Errorf("failed to parse %v: %w", v, err)
 			}
 			insn.Mod = vv
 		case strings.HasPrefix(v, "REG["):
 			insn.Modrm = true
 			vv, err := parseModrm(v[3:])
 			if err != nil {
-				return fmt.Errorf("failed to parse %v: %v", v, err)
+				return fmt.Errorf("failed to parse %v: %w", v, err)
 			}
 			insn.Reg = vv
 		case strings.HasPrefix(v, "RM["):
 			insn.Modrm = true
 			vv, err := parseModrm(v[2:])
 			if err != nil {
-				return fmt.Errorf("failed to parse %v: %v", v, err)
+				return fmt.Errorf("failed to parse %v: %w", v, err)
 			}
 			insn.Rm = vv
 		case v == "RM=4":
@@ -267,7 +270,7 @@ func parsePattern(insn *x86.Insn, vals []string) error {
 		case strings.HasPrefix(v, "SRM["):
 			vv, err := parseModrm(v[3:])
 			if err != nil {
-				return fmt.Errorf("failed to parse %v: %v", v, err)
+				return fmt.Errorf("failed to parse %v: %w", v, err)
 			}
 			insn.Rm = vv
 			insn.Srm = true

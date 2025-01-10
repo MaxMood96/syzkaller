@@ -11,8 +11,8 @@ config:
  - MSDOS_FS
  - VFAT_FS
  - EXFAT_FS
- - NTFS_FS
- - NTFS_RW
+ - NTFS_FS: [-v6.9]
+ - NTFS_RW: [-v6.9]
  - NTFS3_FS: [v5.15]
  - NTFS3_64BIT_CLUSTER: n
  - NTFS3_LZX_XPRESS: [v5.15]
@@ -59,7 +59,6 @@ config:
  - XFS_QUOTA
  - XFS_POSIX_ACL
  - XFS_RT
- - XFS_SUPPORT_V4: [v5.10]
  # Not just sanity checks for code, but also image validation checks that BUG.
  # XFS devs prefer this to be disabled by fuzzers.
  - XFS_DEBUG: n
@@ -96,6 +95,7 @@ config:
  - OVERLAY_FS_REDIRECT_DIR
  - OVERLAY_FS_INDEX
  - OVERLAY_FS_REDIRECT_ALWAYS_FOLLOW
+ - OVERLAY_FS_DEBUG: [v6.6]
 
  - UBIFS_FS
  - UBIFS_FS_ADVANCED_COMPR
@@ -194,3 +194,13 @@ config:
  - ROMFS_BACKED_BY_BOTH
  - ROMFS_ON_BLOCK
  - ROMFS_ON_MTD
+
+ - BCACHEFS_FS: [v6.7]
+ - BCACHEFS_ERASURE_CODING: [v6.7]
+ - BCACHEFS_POSIX_ACL: [v6.7]
+ - BCACHEFS_QUOTA: [v6.7]
+ - BCACHEFS_DEBUG: [v6.7]
+ - BCACHEFS_SIX_OPTIMISTIC_SPIN: [v6.8]
+
+ - FSCACHE
+ - CACHEFILES

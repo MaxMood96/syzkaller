@@ -41,6 +41,11 @@ static void os_init(int argc, char** argv, void* data, size_t data_size)
 	struct rlimit rlim;
 	rlim.rlim_cur = rlim.rlim_max = kMaxFd;
 	setrlimit(RLIMIT_NOFILE, &rlim);
+
+	// A SIGCHLD handler makes sleep in loop exit immediately return with EINTR with a child exits.
+	struct sigaction act = {};
+	act.sa_handler = [](int) {};
+	sigaction(SIGCHLD, &act, nullptr);
 }
 
 static intptr_t execute_syscall(const call_t* c, intptr_t a[kMaxArgs])
@@ -174,16 +179,11 @@ static void cover_collect(cover_t* cov)
 	cov->size = *(uint64*)cov->data;
 }
 
-static bool use_cover_edges(uint64 pc)
-{
-	return true;
-}
-
 #if GOOS_netbsd
 #define SYZ_HAVE_FEATURES 1
 static feature_t features[] = {
-    {"usb", setup_usb},
-    {"fault", setup_fault},
+    {rpc::Feature::USBEmulation, setup_usb},
+    {rpc::Feature::Fault, setup_fault},
 };
 
 static void setup_sysctl(void)

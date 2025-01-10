@@ -32,15 +32,9 @@ import (
 	"golang.org/x/tools/go/analysis/passes/structtag"
 )
 
-var AnalyzerPlugin analyzerPlugin
+func main() {}
 
-type analyzerPlugin struct{}
-
-func main() {
-	_ = AnalyzerPlugin
-}
-
-func (*analyzerPlugin) GetAnalyzers() []*analysis.Analyzer {
+func New(conf any) ([]*analysis.Analyzer, error) {
 	return []*analysis.Analyzer{
 		SyzAnalyzer,
 		// Some standard analyzers that are not enabled in vet.
@@ -49,7 +43,7 @@ func (*analyzerPlugin) GetAnalyzers() []*analysis.Analyzer {
 		deepequalerrors.Analyzer,
 		nilness.Analyzer,
 		structtag.Analyzer,
-	}
+	}, nil
 }
 
 var SyzAnalyzer = &analysis.Analyzer{
@@ -145,7 +139,7 @@ var (
 	noPeriodComment   = regexp.MustCompile(`^// [A-Z][a-z].+[a-z]$`)
 	lowerCaseComment  = regexp.MustCompile(`^// [a-z]+ `)
 	onelineExceptions = regexp.MustCompile(`// want \"|http:|https:`)
-	specialComment    = regexp.MustCompile(`//go:generate|//go:build|//go:embed|// nolint:`)
+	specialComment    = regexp.MustCompile(`//go:generate|//go:build|//go:embed|//go:linkname|// nolint:`)
 )
 
 // checkStringLenCompare checks for string len comparisons with 0.
@@ -258,7 +252,7 @@ func (pass *Pass) checkFlagDefinition(n *ast.CallExpr) {
 // checkLogErrorFormat warns about log/error messages starting with capital letter or ending with a period.
 func (pass *Pass) checkLogErrorFormat(n *ast.CallExpr) {
 	arg, newLine, sure := pass.logFormatArg(n)
-	if arg == -1 {
+	if arg == -1 || len(n.Args) <= arg {
 		return
 	}
 	val, ok := stringLit(n.Args[arg])
@@ -307,11 +301,18 @@ func (pass *Pass) logFormatArg(n *ast.CallExpr) (arg int, newLine, sure bool) {
 			break
 		}
 		return 1, true, true
+	case "t.Errorf", "t.Fatalf":
+		return 0, false, true
+	case "tool.Failf":
+		return 0, false, true
+	}
+	if fun.Sel.String() == "Logf" {
+		return 0, false, true
 	}
 	return -1, false, false
 }
 
-var publicIdentifier = regexp.MustCompile(`^[A-Z][[:alnum:]]+(\.[[:alnum:]]+)+ `)
+var publicIdentifier = regexp.MustCompile(`^[A-Z][[:alnum:]]+?((\.|[A-Z])[[:alnum:]]+)+ `)
 
 func stringLit(n ast.Node) (string, bool) {
 	lit, ok := n.(*ast.BasicLit)

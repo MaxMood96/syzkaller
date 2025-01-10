@@ -4,6 +4,7 @@
 package asset
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/url"
@@ -22,7 +23,7 @@ type cloudStorageBackend struct {
 
 func makeCloudStorageBackend(bucket string, tracer debugtracer.DebugTracer) (*cloudStorageBackend, error) {
 	tracer.Log("created gcs backend for bucket '%s'", bucket)
-	client, err := gcs.NewClient()
+	client, err := gcs.NewClient(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("the call to NewClient failed: %w", err)
 	}
@@ -103,19 +104,8 @@ func (csb *cloudStorageBackend) getPath(downloadURL string) (string, error) {
 	return u.Path[len(prefix):], nil
 }
 
-func (csb *cloudStorageBackend) list() ([]storedObject, error) {
-	list, err := csb.client.ListObjects(csb.bucket)
-	if err != nil {
-		return nil, err
-	}
-	ret := []storedObject{}
-	for _, obj := range list {
-		ret = append(ret, storedObject{
-			path:      obj.Path,
-			createdAt: obj.CreatedAt,
-		})
-	}
-	return ret, nil
+func (csb *cloudStorageBackend) list() ([]*gcs.Object, error) {
+	return csb.client.ListObjects(csb.bucket)
 }
 
 func (csb *cloudStorageBackend) remove(path string) error {
