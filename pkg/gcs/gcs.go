@@ -38,8 +38,7 @@ func (file *File) Reader() (io.ReadCloser, error) {
 	return file.handle.NewReader(file.ctx)
 }
 
-func NewClient() (*Client, error) {
-	ctx := context.Background()
+func NewClient(ctx context.Context) (*Client, error) {
 	storageClient, err := storage.NewClient(ctx)
 	if err != nil {
 		return nil, err
@@ -64,7 +63,7 @@ func (client *Client) Read(gcsFile string) (*File, error) {
 	f := bkt.Object(filename)
 	attrs, err := f.Attrs(client.ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read %v attributes: %v", gcsFile, err)
+		return nil, fmt.Errorf("failed to read %v attributes: %w", gcsFile, err)
 	}
 	if !attrs.Deleted.IsZero() {
 		return nil, fmt.Errorf("file %v is deleted", gcsFile)
@@ -176,9 +175,14 @@ type Object struct {
 	CreatedAt time.Time
 }
 
-func (client *Client) ListObjects(bucket string) ([]*Object, error) {
-	ctx := context.Background()
-	it := client.client.Bucket(bucket).Objects(ctx, nil)
+// ListObjects expects "bucket/path" or "bucket" as input.
+func (client *Client) ListObjects(bucketObjectPath string) ([]*Object, error) {
+	bucket, objectPath, err := split(bucketObjectPath)
+	if err != nil { // no path specified
+		bucket = bucketObjectPath
+	}
+	query := &storage.Query{Prefix: objectPath}
+	it := client.client.Bucket(bucket).Objects(client.ctx, query)
 	ret := []*Object{}
 	for {
 		objAttrs, err := it.Next()

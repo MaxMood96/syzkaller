@@ -9,9 +9,9 @@ config:
  - CRYPTO_CURVE25519: [v5.6]
  - CRYPTO_CHACHA20POLY1305
  - CRYPTO_AEGIS128
- - CRYPTO_CFB
+ - CRYPTO_CFB: [-v5.8]
  - CRYPTO_LRW
- - CRYPTO_OFB
+ - CRYPTO_OFB: [-v5.8]
  - CRYPTO_CTS
  - CRYPTO_XTS
  - CRYPTO_KEYWRAP
@@ -30,7 +30,8 @@ config:
  - CRYPTO_TGR192: [-v5.12]
  - CRYPTO_SALSA20: [-v5.12]
  - CRYPTO_SHA3
- - CRYPTO_SM3
+ # Not used in arm32. On riscv, requires TOOLCHAIN_HAS_VECTOR_CRYPTO.
+ - CRYPTO_SM3: [-kmsan, -arm, -riscv]
  - CRYPTO_SM3_AVX_X86_64: [v6.1, x86_64, -kmsan]
  - CRYPTO_WP512
  - CRYPTO_AES_TI
@@ -59,7 +60,7 @@ config:
  - CRYPTO_USER_API_AEAD
  - CRYPTO_HW
  - CRYPTO_DEV_VIRTIO
- - CRYPTO_SM2: [v5.10]
+ - CRYPTO_SM2: [v5.10, -v6.11]
  - CRYPTO_DEV_CCP: [-arm, -riscv, -s390]
  - CRYPTO_DEV_CCP_DD: [-arm, -riscv, -s390]
  - CRYPTO_DEV_SP_CCP: n

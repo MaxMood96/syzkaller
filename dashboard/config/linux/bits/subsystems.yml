@@ -26,8 +26,8 @@ config:
  - NUMA_EMU: [x86_64]
  - NUMA_BALANCING: [-arm]
  - NUMA_BALANCING_DEFAULT_ENABLED: [-arm]
- - ADDRESS_MASKING: [x86_64, linux-next]
- - X86_USER_SHADOW_STACK: [x86_64, linux-next]
+ - ADDRESS_MASKING: [x86_64, v6.4]
+ - X86_USER_SHADOW_STACK: [x86_64, v6.6]
  # KMSAN disables HYPERVISOR_GUEST which is required to enable this.
  - X86_X2APIC: [x86_64, -kmsan]
  - CGROUPS
@@ -69,6 +69,9 @@ config:
  - KVM_INTEL: [x86_64]
  - KVM_AMD: [x86_64]
  - KVM_XEN: [x86_64, v5.12]
+ - KVM_PROVE_MMU: [x86_64, v6.6]
+ - KVM_SW_PROTECTED_VM: [x86_64, linux-next]
+ - KVM_HYPERV: [x86_64, linux-next]
  # KMSAN disables HYPERVISOR_GUEST which is required to enable X86_X2APIC
  # which is required to enable this.
  - X86_SGX: [x86_64, v5.11, -kmsan]
@@ -100,10 +103,11 @@ config:
  - KSM
  - TRANSPARENT_HUGEPAGE: [-arm, -riscv]
  - TRANSPARENT_HUGEPAGE_MADVISE: [-arm, -riscv]
- - FRONTSWAP
+ - FRONTSWAP: [-v6.6]
  - CMA
  - MEM_SOFT_DIRTY: [x86_64]
  - ZSWAP
+ - ZSWAP_SHRINKER_DEFAULT_ON: [v6.8]
  - ZSMALLOC
  - IDLE_PAGE_TRACKING: [-v5.15]
  - ZONE_DEVICE: [-arm, -riscv, -s390]
@@ -145,7 +149,6 @@ config:
  - DEV_DAX: [x86_64]
  - BLK_DEV_NULL_BLK
  - BLK_DEV_NULL_BLK_FAULT_INJECTION
- - BLK_DEV_FD: [x86_64]
  - ZRAM
  - BLK_DEV_LOOP
  # Loop device per test process.
@@ -186,15 +189,15 @@ config:
  - ATA
  - SATA_AHCI
  - ATA_PIIX
- - PATA_AMD
+ - PATA_AMD: [-s390]
  - PATA_OLDPIIX
  - PATA_SCH
  - ATA_SFF
  - ATA_BMDMA
  - ATA_GENERIC
  - MD
- - MD_LINEAR
- - MD_MULTIPATH
+ - MD_LINEAR: [-v6.8]
+ - MD_MULTIPATH: [-v6.8]
  - BCACHE
  - BLK_DEV_DM
  - DM_CRYPT
@@ -282,7 +285,9 @@ config:
  # Workaround: select small driver that selects DRM_DISPLAY_HELPER required by
  # DRM_DP_AUX_CHARDEV. Only works with architectures that have CONFIG_PM.
  - DRM_PANEL_EDP: [v5.16, -s390]
- - DRM_DP_AUX_CHARDEV: [x86_64]
+ - DRM_DP_AUX_CHARDEV: [x86_64, -v6.10]
+ - DRM_DISPLAY_DP_AUX_BUS: [linux-next]
+ - DRM_DISPLAY_DP_HELPER: [v5.19, -s390]
  - DRM_DEBUG_MM
  - DRM_I915: [x86_64]
  - DRM_VGEM
@@ -363,7 +368,7 @@ config:
  - USB_EHCI_HCD
  - USB_EHCI_ROOT_HUB_TT
  - USB_OHCI_HCD
- - USB_UHCI_HCD
+ - USB_UHCI_HCD: [-s390]
  - USB_ACM
  - USB_PRINTER
  - USB_STORAGE
@@ -470,14 +475,14 @@ config:
  - COUNTER
  - VALIDATE_FS_PARSER
  - PSTORE
- - PSTORE_DEFLATE_COMPRESS
- - PSTORE_LZO_COMPRESS
- - PSTORE_LZ4_COMPRESS
- - PSTORE_LZ4HC_COMPRESS
- - PSTORE_842_COMPRESS
- - PSTORE_ZSTD_COMPRESS
+ - PSTORE_DEFLATE_COMPRESS: [-v6.6]
+ - PSTORE_LZO_COMPRESS: [-v6.6]
+ - PSTORE_LZ4_COMPRESS: [-v6.6]
+ - PSTORE_LZ4HC_COMPRESS: [-v6.6]
+ - PSTORE_842_COMPRESS: [-v6.6]
+ - PSTORE_ZSTD_COMPRESS: [-v6.6]
  - PSTORE_COMPRESS
- - PSTORE_DEFLATE_COMPRESS_DEFAULT
+ - PSTORE_DEFLATE_COMPRESS_DEFAULT: [-v6.6]
  # Didn't find how to enable it for riscv in v5.18
  - FS_DAX: [-arm, -riscv]
  - FS_ENCRYPTION
@@ -491,17 +496,16 @@ config:
  - QUOTA_NETLINK_INTERFACE
  - PRINT_QUOTA_WARNING: n
  - QFMT_V2
- - AUTOFS4_FS
+ - AUTOFS4_FS: [-v6.6]
  - FUSE_FS
  - FUSE_DAX: [v5.10, x86_64]
  - CUSE
  - VIRTIO_FS
- - FSCACHE
- - CACHEFILES
  - PROC_KCORE: [-arm]
  - TMPFS
  - TMPFS_POSIX_ACL
  - TMPFS_XATTR
+ - TMPFS_QUOTA: [v6.6]
  - HUGETLBFS: [-arm]
  - ECRYPT_FS
  - ECRYPT_FS_MESSAGING
@@ -581,16 +585,11 @@ config:
  - DAMON: [v5.15]
  - DAMON_VADDR: [v5.15]
  - DAMON_PADDR: [v5.16]
- - DAMON_DBGFS: [v5.15]
+ # DAMON_DBGFS is getting deprecated in v6.9.
+ - DAMON_DBGFS: [v5.15, -v6.9]
  - DAMON_RECLAIM: [v5.17]
-
- # Multi-gen LRU is the new better LRU implementation
- # that is supposed to be the default in future,
- # so we want to enable it in most tested kernels.
- # It has no relation to smack, but we use the smack tag
- # just to get some kernels tested w/o multi-gen LRU as well.
- - LRU_GEN: [v6.1, -smack]
- - LRU_GEN_ENABLED: [v6.1, -smack]
+ - ZSWAP_DEFAULT_ON: [v5.7]
+ - SMB_SERVER: [v5.15]
 
  # For testing of core dumping functionality itself.
  - COREDUMP

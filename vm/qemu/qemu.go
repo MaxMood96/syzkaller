@@ -27,7 +27,10 @@ import (
 
 func init() {
 	var _ vmimpl.Infoer = (*instance)(nil)
-	vmimpl.Register("qemu", ctor, true)
+	vmimpl.Register("qemu", vmimpl.Type{
+		Ctor:       ctor,
+		Overcommit: true,
+	})
 }
 
 type Config struct {
@@ -108,7 +111,7 @@ type instance struct {
 	qemu        *exec.Cmd
 	merger      *vmimpl.OutputMerger
 	files       map[string]string
-	diagnose    chan bool
+	*snapshot
 }
 
 type archConfig struct {
@@ -146,18 +149,22 @@ var archConfigs = map[string]*archConfig{
 		},
 	},
 	"linux/arm64": {
-		Qemu:     "qemu-system-aarch64",
-		QemuArgs: "-machine virt,virtualization=on -cpu cortex-a57",
-		NetDev:   "virtio-net-pci",
-		RngDev:   "virtio-rng-pci",
+		Qemu: "qemu-system-aarch64",
+		// Disable SVE and pointer authentication for now, they significantly slow down
+		// the emulation and are unlikely to bring a lot of new coverage.
+		QemuArgs: strings.Join([]string{"-machine virt,virtualization=on,gic-version=max ",
+			"-cpu max,sve128=on,pauth=off"}, ""),
+		NetDev: "virtio-net-pci",
+		RngDev: "virtio-rng-pci",
 		CmdLine: []string{
 			"root=/dev/vda",
 			"console=ttyAMA0",
 		},
 	},
 	"linux/arm": {
-		Qemu:                   "qemu-system-arm",
-		QemuArgs:               "-machine vexpress-a15 -cpu max",
+		Qemu: "qemu-system-arm",
+		// For some reason, new qemu-system-arm versions complain that "The only valid type is: cortex-a15".
+		QemuArgs:               "-machine vexpress-a15 -cpu cortex-a15 -accel tcg,thread=multi",
 		NetDev:                 "virtio-net-device",
 		RngDev:                 "virtio-rng-device",
 		UseNewQemuImageOptions: true,
@@ -254,12 +261,6 @@ var archConfigs = map[string]*archConfig{
 			"kernel.lockup-detector.heartbeat-age-fatal-threshold-ms=300000",
 		},
 	},
-	"akaros/amd64": {
-		Qemu:     "qemu-system-x86_64",
-		QemuArgs: "-enable-kvm -cpu host,migratable=off",
-		NetDev:   "e1000",
-		RngDev:   "virtio-rng-pci",
-	},
 }
 
 func ctor(env *vmimpl.Env) (vmimpl.Pool, error) {
@@ -275,14 +276,10 @@ func ctor(env *vmimpl.Env) (vmimpl.Pool, error) {
 		Snapshot:    true,
 	}
 	if err := config.LoadData(env.Config, cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse qemu vm config: %v", err)
+		return nil, fmt.Errorf("failed to parse qemu vm config: %w", err)
 	}
-	if cfg.Count < 1 || cfg.Count > 128 {
-		return nil, fmt.Errorf("invalid config param count: %v, want [1, 128]", cfg.Count)
-	}
-	if env.Debug && cfg.Count > 1 {
-		log.Logf(0, "limiting number of VMs from %v to 1 in debug mode", cfg.Count)
-		cfg.Count = 1
+	if cfg.Count < 1 || cfg.Count > 1024 {
+		return nil, fmt.Errorf("invalid config param count: %v, want [1, 1024]", cfg.Count)
 	}
 	if _, err := exec.LookPath(cfg.Qemu); err != nil {
 		return nil, err
@@ -340,7 +337,7 @@ func (pool *Pool) Create(workdir string, index int) (vmimpl.Instance, error) {
 		}
 		initFile := filepath.Join(workdir, "init.sh")
 		if err := osutil.WriteExecFile(initFile, []byte(strings.Replace(initScript, "{{KEY}}", sshkey, -1))); err != nil {
-			return nil, fmt.Errorf("failed to create init file: %v", err)
+			return nil, fmt.Errorf("failed to create init file: %w", err)
 		}
 	}
 
@@ -360,7 +357,7 @@ func (pool *Pool) Create(workdir string, index int) (vmimpl.Instance, error) {
 	}
 }
 
-func (pool *Pool) ctor(workdir, sshkey, sshuser string, index int) (vmimpl.Instance, error) {
+func (pool *Pool) ctor(workdir, sshkey, sshuser string, index int) (*instance, error) {
 	inst := &instance{
 		index:      index,
 		cfg:        pool.cfg,
@@ -374,9 +371,11 @@ func (pool *Pool) ctor(workdir, sshkey, sshuser string, index int) (vmimpl.Insta
 		workdir:    workdir,
 		sshkey:     sshkey,
 		sshuser:    sshuser,
-		diagnose:   make(chan bool, 1),
 	}
-	if st, err := os.Stat(inst.image); err != nil && st.Size() == 0 {
+	if pool.env.Snapshot {
+		inst.snapshot = new(snapshot)
+	}
+	if st, err := os.Stat(inst.image); err == nil && st.Size() == 0 {
 		// Some kernels may not need an image, however caller may still
 		// want to pass us a fake empty image because the rest of syzkaller
 		// assumes that an image is mandatory. So if the image is empty, we ignore it.
@@ -403,7 +402,7 @@ func (pool *Pool) ctor(workdir, sshkey, sshuser string, index int) (vmimpl.Insta
 	return inst, nil
 }
 
-func (inst *instance) Close() {
+func (inst *instance) Close() error {
 	if inst.qemu != nil {
 		inst.qemu.Process.Kill()
 		inst.qemu.Wait()
@@ -420,11 +419,74 @@ func (inst *instance) Close() {
 	if inst.mon != nil {
 		inst.mon.Close()
 	}
+	if inst.snapshot != nil {
+		inst.snapshotClose()
+	}
+	return nil
 }
 
 func (inst *instance) boot() error {
 	inst.port = vmimpl.UnusedTCPPort()
 	inst.monport = vmimpl.UnusedTCPPort()
+	args, err := inst.buildQemuArgs()
+	if err != nil {
+		return err
+	}
+	if inst.debug {
+		log.Logf(0, "running command: %v %#v", inst.cfg.Qemu, args)
+	}
+	inst.args = args
+	qemu := osutil.Command(inst.cfg.Qemu, args...)
+	qemu.Stdout = inst.wpipe
+	qemu.Stderr = inst.wpipe
+	if err := qemu.Start(); err != nil {
+		return fmt.Errorf("failed to start %v %+v: %w", inst.cfg.Qemu, args, err)
+	}
+	inst.wpipe.Close()
+	inst.wpipe = nil
+	inst.qemu = qemu
+	// Qemu has started.
+
+	// Start output merger.
+	var tee io.Writer
+	if inst.debug {
+		tee = os.Stdout
+	}
+	inst.merger = vmimpl.NewOutputMerger(tee)
+	inst.merger.Add("qemu", inst.rpipe)
+	inst.rpipe = nil
+
+	var bootOutput []byte
+	bootOutputStop := make(chan bool)
+	go func() {
+		for {
+			select {
+			case out := <-inst.merger.Output:
+				bootOutput = append(bootOutput, out...)
+			case <-bootOutputStop:
+				close(bootOutputStop)
+				return
+			}
+		}
+	}()
+
+	if inst.snapshot != nil {
+		if err := inst.snapshotHandshake(); err != nil {
+			return err
+		}
+	}
+
+	if err := vmimpl.WaitForSSH(inst.debug, 10*time.Minute*inst.timeouts.Scale, "localhost",
+		inst.sshkey, inst.sshuser, inst.os, inst.port, inst.merger.Err, false); err != nil {
+		bootOutputStop <- true
+		<-bootOutputStop
+		return vmimpl.MakeBootError(err, bootOutput)
+	}
+	bootOutputStop <- true
+	return nil
+}
+
+func (inst *instance) buildQemuArgs() ([]string, error) {
 	args := []string{
 		"-m", strconv.Itoa(inst.cfg.Mem),
 		"-smp", strconv.Itoa(inst.cfg.CPU),
@@ -442,7 +504,8 @@ func (inst *instance) boot() error {
 	args = append(args, splitArgs(inst.cfg.QemuArgs, templateDir, inst.index)...)
 	args = append(args,
 		"-device", inst.cfg.NetDev+",netdev=net0",
-		"-netdev", fmt.Sprintf("user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:%v-:22", inst.port))
+		"-netdev", fmt.Sprintf("user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:%v-:22", inst.port),
+	)
 	if inst.image == "9p" {
 		args = append(args,
 			"-fsdev", "local,id=fsdev0,path=/,security_model=none,readonly",
@@ -505,51 +568,14 @@ func (inst *instance) boot() error {
 			"-device", "isa-applesmc,osk="+inst.cfg.AppleSmcOsk,
 		)
 	}
-	if inst.debug {
-		log.Logf(0, "running command: %v %#v", inst.cfg.Qemu, args)
-	}
-	inst.args = args
-	qemu := osutil.Command(inst.cfg.Qemu, args...)
-	qemu.Stdout = inst.wpipe
-	qemu.Stderr = inst.wpipe
-	if err := qemu.Start(); err != nil {
-		return fmt.Errorf("failed to start %v %+v: %v", inst.cfg.Qemu, args, err)
-	}
-	inst.wpipe.Close()
-	inst.wpipe = nil
-	inst.qemu = qemu
-	// Qemu has started.
-
-	// Start output merger.
-	var tee io.Writer
-	if inst.debug {
-		tee = os.Stdout
-	}
-	inst.merger = vmimpl.NewOutputMerger(tee)
-	inst.merger.Add("qemu", inst.rpipe)
-	inst.rpipe = nil
-
-	var bootOutput []byte
-	bootOutputStop := make(chan bool)
-	go func() {
-		for {
-			select {
-			case out := <-inst.merger.Output:
-				bootOutput = append(bootOutput, out...)
-			case <-bootOutputStop:
-				close(bootOutputStop)
-				return
-			}
+	if inst.snapshot != nil {
+		snapshotArgs, err := inst.snapshotEnable()
+		if err != nil {
+			return nil, err
 		}
-	}()
-	if err := vmimpl.WaitForSSH(inst.debug, 10*time.Minute*inst.timeouts.Scale, "localhost",
-		inst.sshkey, inst.sshuser, inst.os, inst.port, inst.merger.Err); err != nil {
-		bootOutputStop <- true
-		<-bootOutputStop
-		return vmimpl.MakeBootError(err, bootOutput)
+		args = append(args, snapshotArgs...)
 	}
-	bootOutputStop <- true
-	return nil
+	return args, nil
 }
 
 // "vfio-pci,host=BN:DN.{{FN%8}},addr=0x11".
@@ -616,7 +642,7 @@ func (inst *instance) Copy(hostSrc string) (string, error) {
 	base := filepath.Base(hostSrc)
 	vmDst := filepath.Join(inst.targetDir(), base)
 	if inst.target.HostFuzzer {
-		if base == "syz-fuzzer" || base == "syz-execprog" {
+		if base == "syz-execprog" {
 			return hostSrc, nil // we will run these on host
 		}
 		if inst.files == nil {
@@ -625,7 +651,7 @@ func (inst *instance) Copy(hostSrc string) (string, error) {
 		inst.files[vmDst] = hostSrc
 	}
 
-	args := append(vmimpl.SCPArgs(inst.debug, inst.sshkey, inst.port),
+	args := append(vmimpl.SCPArgs(inst.debug, inst.sshkey, inst.port, false),
 		hostSrc, inst.sshuser+"@localhost:"+vmDst)
 	if inst.debug {
 		log.Logf(0, "running command: scp %#v", args)
@@ -645,11 +671,10 @@ func (inst *instance) Run(timeout time.Duration, stop <-chan bool, command strin
 	}
 	inst.merger.Add("ssh", rpipe)
 
-	sshArgs := vmimpl.SSHArgsForward(inst.debug, inst.sshkey, inst.port, inst.forwardPort)
+	sshArgs := vmimpl.SSHArgsForward(inst.debug, inst.sshkey, inst.port, inst.forwardPort, false)
 	args := strings.Split(command, " ")
-	if bin := filepath.Base(args[0]); inst.target.HostFuzzer &&
-		(bin == "syz-fuzzer" || bin == "syz-execprog") {
-		// Weird mode for fuchsia and akaros.
+	if bin := filepath.Base(args[0]); inst.target.HostFuzzer && bin == "syz-execprog" {
+		// Weird mode for Fuchsia.
 		// Fuzzer and execprog are on host (we did not copy them), so we will run them as is,
 		// but we will also wrap executor with ssh invocation.
 		for i, arg := range args {
@@ -678,38 +703,11 @@ func (inst *instance) Run(timeout time.Duration, stop <-chan bool, command strin
 		return nil, nil, err
 	}
 	wpipe.Close()
-	errc := make(chan error, 1)
-	signal := func(err error) {
-		select {
-		case errc <- err:
-		default:
-		}
-	}
-
-	go func() {
-	retry:
-		select {
-		case <-time.After(timeout):
-			signal(vmimpl.ErrTimeout)
-		case <-stop:
-			signal(vmimpl.ErrTimeout)
-		case <-inst.diagnose:
-			cmd.Process.Kill()
-			goto retry
-		case err := <-inst.merger.Err:
-			cmd.Process.Kill()
-			if cmdErr := cmd.Wait(); cmdErr == nil {
-				// If the command exited successfully, we got EOF error from merger.
-				// But in this case no error has happened and the EOF is expected.
-				err = nil
-			}
-			signal(err)
-			return
-		}
-		cmd.Process.Kill()
-		cmd.Wait()
-	}()
-	return inst.merger.Output, errc, nil
+	return vmimpl.Multiplex(cmd, inst.merger, timeout, vmimpl.MultiplexConfig{
+		Stop:  stop,
+		Debug: inst.debug,
+		Scale: inst.timeouts.Scale,
+	})
 }
 
 func (inst *instance) Info() ([]byte, error) {
@@ -744,7 +742,7 @@ func (inst *instance) ssh(args ...string) ([]byte, error) {
 }
 
 func (inst *instance) sshArgs(args ...string) []string {
-	sshArgs := append(vmimpl.SSHArgs(inst.debug, inst.sshkey, inst.port), inst.sshuser+"@localhost")
+	sshArgs := append(vmimpl.SSHArgs(inst.debug, inst.sshkey, inst.port, false), inst.sshuser+"@localhost")
 	return append(sshArgs, args...)
 }
 

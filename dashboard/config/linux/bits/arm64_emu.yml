@@ -24,6 +24,8 @@ config:
  - DRM_LIMA: n
  - DRM_PANFROST: n
  - DRM_LEGACY: n
+ - DRM_SAMSUNG_DSIM: n
+ - DRM_NWL_MIPI_DSI: n
  - FB_IBM_GXT4500: n
  - SMS_SIANO_RC: n
  - V4L_PLATFORM_DRIVERS: n
@@ -31,7 +33,6 @@ config:
  - SSB: n
  - MMC: n
  - PWM: n
- - PINCTRL: n
  - RC_CORE: n
  - HWMON: n
  - REGULATOR: n
@@ -83,6 +84,7 @@ config:
  - ARCH_S32: n
  - ARCH_SEATTLE: n
  - ARCH_STRATIX10: n
+ - ARCH_STM32: n
  - ARCH_SYNQUACER: n
  - ARCH_TEGRA: n
  - ARCH_SPRD: n
@@ -901,6 +903,9 @@ config:
 
  # Disable whole menu "PHY Subsystem"
  - GENERIC_PHY: n
+ - GENERIC_PHY_MIPI_DPHY: n
+ - PHY_CADENCE_DPHY_RX: n
+ - PHY_FSL_IMX8M_PCIE: n
  - PHY_CAN_TRANSCEIVER: [n, v6.3]
  - PHY_LPC18XX_USB_OTG: n
  - PHY_PISTACHIO_USB: n

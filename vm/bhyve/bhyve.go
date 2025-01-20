@@ -21,11 +21,14 @@ import (
 )
 
 func init() {
-	vmimpl.Register("bhyve", ctor, true)
+	vmimpl.Register("bhyve", vmimpl.Type{
+		Ctor:       ctor,
+		Overcommit: true,
+	})
 }
 
 type Config struct {
-	Bridge  string `json:"bridge"`  // name of network bridge device
+	Bridge  string `json:"bridge"`  // name of network bridge device, optional
 	Count   int    `json:"count"`   // number of VMs to use
 	CPU     int    `json:"cpu"`     // number of VM vCPU
 	HostIP  string `json:"hostip"`  // VM host IP address
@@ -39,19 +42,21 @@ type Pool struct {
 }
 
 type instance struct {
-	cfg      *Config
-	snapshot string
-	tapdev   string
-	image    string
-	debug    bool
-	os       string
-	sshkey   string
-	sshuser  string
-	sshhost  string
-	merger   *vmimpl.OutputMerger
-	vmName   string
-	bhyve    *exec.Cmd
-	consolew io.WriteCloser
+	cfg         *Config
+	snapshot    string
+	tapdev      string
+	port        int
+	forwardPort int
+	image       string
+	debug       bool
+	os          string
+	sshkey      string
+	sshuser     string
+	sshhost     string
+	merger      *vmimpl.OutputMerger
+	vmName      string
+	bhyve       *exec.Cmd
+	consolew    io.WriteCloser
 }
 
 var ipRegex = regexp.MustCompile(`bound to (([0-9]+\.){3}[0-9]+) `)
@@ -64,14 +69,10 @@ func ctor(env *vmimpl.Env) (vmimpl.Pool, error) {
 		Mem:   "512M",
 	}
 	if err := config.LoadData(env.Config, cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse bhyve vm config: %v", err)
+		return nil, fmt.Errorf("failed to parse bhyve vm config: %w", err)
 	}
 	if cfg.Count < 1 || cfg.Count > 128 {
 		return nil, fmt.Errorf("invalid config param count: %v, want [1-128]", cfg.Count)
-	}
-	if env.Debug && cfg.Count > 1 {
-		log.Logf(0, "limiting number of VMs from %v to 1 in debug mode", cfg.Count)
-		cfg.Count = 1
 	}
 	pool := &Pool{
 		cfg: cfg,
@@ -129,15 +130,17 @@ func (pool *Pool) Create(workdir string, index int) (vmimpl.Instance, error) {
 		return nil, err
 	}
 
-	tapdev, err := osutil.RunCmd(time.Minute, "", "ifconfig", "tap", "create")
-	if err != nil {
-		inst.Close()
-		return nil, err
-	}
-	inst.tapdev = tapRegex.FindString(string(tapdev))
-	if _, err := osutil.RunCmd(time.Minute, "", "ifconfig", inst.cfg.Bridge, "addm", inst.tapdev); err != nil {
-		inst.Close()
-		return nil, err
+	if inst.cfg.Bridge != "" {
+		tapdev, err := osutil.RunCmd(time.Minute, "", "ifconfig", "tap", "create")
+		if err != nil {
+			inst.Close()
+			return nil, err
+		}
+		inst.tapdev = tapRegex.FindString(string(tapdev))
+		if _, err := osutil.RunCmd(time.Minute, "", "ifconfig", inst.cfg.Bridge, "addm", inst.tapdev); err != nil {
+			inst.Close()
+			return nil, err
+		}
 	}
 
 	if err := inst.Boot(); err != nil {
@@ -165,13 +168,22 @@ func (inst *instance) Boot() error {
 		return err
 	}
 
+	netdev := ""
+	if inst.tapdev != "" {
+		inst.port = 22
+		netdev = inst.tapdev
+	} else {
+		inst.port = vmimpl.UnusedTCPPort()
+		netdev = fmt.Sprintf("slirp,hostfwd=tcp:127.0.0.1:%v-:22", inst.port)
+	}
+
 	bhyveArgs := []string{
 		"-H", "-A", "-P",
 		"-c", fmt.Sprintf("%d", inst.cfg.CPU),
 		"-m", inst.cfg.Mem,
 		"-s", "0:0,hostbridge",
 		"-s", "1:0,lpc",
-		"-s", fmt.Sprintf("2:0,virtio-net,%v", inst.tapdev),
+		"-s", fmt.Sprintf("2:0,virtio-net,%v", netdev),
 		"-s", fmt.Sprintf("3:0,virtio-blk,%v", inst.image),
 		"-l", "com1,stdio",
 		inst.vmName,
@@ -238,7 +250,11 @@ func (inst *instance) Boot() error {
 
 	select {
 	case ip := <-ipch:
-		inst.sshhost = ip
+		if inst.tapdev != "" {
+			inst.sshhost = ip
+		} else {
+			inst.sshhost = "localhost"
+		}
 	case <-inst.merger.Err:
 		bootOutputStop <- true
 		<-bootOutputStop
@@ -250,7 +266,7 @@ func (inst *instance) Boot() error {
 	}
 
 	if err := vmimpl.WaitForSSH(inst.debug, 10*time.Minute, inst.sshhost,
-		inst.sshkey, inst.sshuser, inst.os, 22, nil); err != nil {
+		inst.sshkey, inst.sshuser, inst.os, inst.port, nil, false); err != nil {
 		bootOutputStop <- true
 		<-bootOutputStop
 		return vmimpl.MakeBootError(err, bootOutput)
@@ -259,7 +275,7 @@ func (inst *instance) Boot() error {
 	return nil
 }
 
-func (inst *instance) Close() {
+func (inst *instance) Close() error {
 	if inst.consolew != nil {
 		inst.consolew.Close()
 	}
@@ -277,15 +293,27 @@ func (inst *instance) Close() {
 		osutil.RunCmd(time.Minute, "", "ifconfig", inst.tapdev, "destroy")
 		inst.tapdev = ""
 	}
+	return nil
 }
 
 func (inst *instance) Forward(port int) (string, error) {
-	return fmt.Sprintf("%v:%v", inst.cfg.HostIP, port), nil
+	if inst.tapdev != "" {
+		return fmt.Sprintf("%v:%v", inst.cfg.HostIP, port), nil
+	} else {
+		if port == 0 {
+			return "", fmt.Errorf("vm/bhyve: forward port is zero")
+		}
+		if inst.forwardPort != 0 {
+			return "", fmt.Errorf("vm/bhyve: forward port is already set")
+		}
+		inst.forwardPort = port
+		return fmt.Sprintf("localhost:%v", port), nil
+	}
 }
 
 func (inst *instance) Copy(hostSrc string) (string, error) {
 	vmDst := filepath.Join("/root", filepath.Base(hostSrc))
-	args := append(vmimpl.SCPArgs(inst.debug, inst.sshkey, 22),
+	args := append(vmimpl.SCPArgs(inst.debug, inst.sshkey, inst.port, false),
 		hostSrc, inst.sshuser+"@"+inst.sshhost+":"+vmDst)
 	if inst.debug {
 		log.Logf(0, "running command: scp %#v", args)
@@ -305,8 +333,13 @@ func (inst *instance) Run(timeout time.Duration, stop <-chan bool, command strin
 	}
 	inst.merger.Add("ssh", rpipe)
 
-	args := append(vmimpl.SSHArgs(inst.debug, inst.sshkey, 22),
-		inst.sshuser+"@"+inst.sshhost, command)
+	var sshargs []string
+	if inst.forwardPort != 0 {
+		sshargs = vmimpl.SSHArgsForward(inst.debug, inst.sshkey, inst.port, inst.forwardPort, false)
+	} else {
+		sshargs = vmimpl.SSHArgs(inst.debug, inst.sshkey, inst.port, false)
+	}
+	args := append(sshargs, inst.sshuser+"@"+inst.sshhost, command)
 	if inst.debug {
 		log.Logf(0, "running command: ssh %#v", args)
 	}

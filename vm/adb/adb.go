@@ -2,7 +2,6 @@
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 //go:build !ppc64le
-// +build !ppc64le
 
 package adb
 
@@ -23,11 +22,14 @@ import (
 	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/osutil"
 	"github.com/google/syzkaller/pkg/report"
+	"github.com/google/syzkaller/sys/targets"
 	"github.com/google/syzkaller/vm/vmimpl"
 )
 
 func init() {
-	vmimpl.Register("adb", ctor, false)
+	vmimpl.Register("adb", vmimpl.Type{
+		Ctor: ctor,
+	})
 }
 
 type Device struct {
@@ -58,17 +60,19 @@ type Pool struct {
 }
 
 type instance struct {
-	cfg     *Config
-	adbBin  string
-	device  string
-	console string
-	closed  chan bool
-	debug   bool
+	cfg      *Config
+	adbBin   string
+	device   string
+	console  string
+	closed   chan bool
+	debug    bool
+	timeouts targets.Timeouts
 }
 
 var (
-	androidSerial = "^[0-9A-Z]+$"
+	androidSerial = "^[0-9A-Za-z]+$"
 	ipAddress     = `^(?:localhost|(?:[0-9]{1,3}\.){3}[0-9]{1,3})\:(?:[0-9]{1,5})$` // cuttlefish or remote_device_proxy
+	emulatorID    = `^emulator\-\d+$`
 )
 
 func loadDevice(data []byte) (*Device, error) {
@@ -77,7 +81,7 @@ func loadDevice(data []byte) (*Device, error) {
 	err1 := config.LoadData(data, devObj)
 	err2 := config.LoadData(data, &devStr)
 	if err1 != nil && err2 != nil {
-		return nil, fmt.Errorf("failed to parse adb vm config: %v %v", err1, err2)
+		return nil, fmt.Errorf("failed to parse adb vm config: %w %w", err1, err2)
 	}
 	if err2 == nil {
 		devObj.Serial = devStr
@@ -92,7 +96,7 @@ func ctor(env *vmimpl.Env) (vmimpl.Pool, error) {
 		TargetReboot: true,
 	}
 	if err := config.LoadData(env.Config, cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse adb vm config: %v", err)
+		return nil, fmt.Errorf("failed to parse adb vm config: %w", err)
 	}
 	if _, err := exec.LookPath(cfg.Adb); err != nil {
 		return nil, err
@@ -100,8 +104,8 @@ func ctor(env *vmimpl.Env) (vmimpl.Pool, error) {
 	if len(cfg.Devices) == 0 {
 		return nil, fmt.Errorf("no adb devices specified")
 	}
-	// Device should be either regular serial number, or a valid Cuttlefish ID.
-	devRe := regexp.MustCompile(fmt.Sprintf("%s|%s", androidSerial, ipAddress))
+	// Device should be either regular serial number, a valid Cuttlefish ID, or an Android Emulator ID.
+	devRe := regexp.MustCompile(fmt.Sprintf("%s|%s|%s", androidSerial, ipAddress, emulatorID))
 	for _, dev := range cfg.Devices {
 		device, err := loadDevice(dev)
 		if err != nil {
@@ -110,9 +114,6 @@ func ctor(env *vmimpl.Env) (vmimpl.Pool, error) {
 		if !devRe.MatchString(device.Serial) {
 			return nil, fmt.Errorf("invalid adb device id '%v'", device.Serial)
 		}
-	}
-	if env.Debug {
-		cfg.Devices = cfg.Devices[:1]
 	}
 	pool := &Pool{
 		cfg: cfg,
@@ -131,12 +132,13 @@ func (pool *Pool) Create(workdir string, index int) (vmimpl.Instance, error) {
 		return nil, err
 	}
 	inst := &instance{
-		cfg:     pool.cfg,
-		adbBin:  pool.cfg.Adb,
-		device:  device.Serial,
-		console: device.Console,
-		closed:  make(chan bool),
-		debug:   pool.env.Debug,
+		cfg:      pool.cfg,
+		adbBin:   pool.cfg.Adb,
+		device:   device.Serial,
+		console:  device.Console,
+		closed:   make(chan bool),
+		debug:    pool.env.Debug,
+		timeouts: pool.env.Timeouts,
 	}
 	closeInst := inst
 	defer func() {
@@ -228,7 +230,7 @@ func findConsoleImpl(adb, dev string) (string, error) {
 	// Search all consoles, as described in 'findConsole'
 	consoles, err := filepath.Glob("/dev/ttyUSB*")
 	if err != nil {
-		return "", fmt.Errorf("failed to list /dev/ttyUSB devices: %v", err)
+		return "", fmt.Errorf("failed to list /dev/ttyUSB devices: %w", err)
 	}
 	output := make(map[string]*[]byte)
 	errors := make(chan error, len(consoles))
@@ -261,7 +263,7 @@ func findConsoleImpl(adb, dev string) (string, error) {
 	unique := fmt.Sprintf(">>>%v<<<", dev)
 	cmd := osutil.Command(adb, "-s", dev, "shell", "echo", "\"<1>", unique, "\"", ">", "/dev/kmsg")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("failed to run adb shell: %v\n%s", err, out)
+		return "", fmt.Errorf("failed to run adb shell: %w\n%s", err, out)
 	}
 	time.Sleep(500 * time.Millisecond)
 	close(done)
@@ -323,7 +325,7 @@ func (inst *instance) adbWithTimeout(timeout time.Duration, args ...string) ([]b
 }
 
 func (inst *instance) waitForBootCompletion() {
-	// ADB connects to a phone and starts syz-fuzzer while the phone is still booting.
+	// ADB connects to a phone and starts syz-executor while the phone is still booting.
 	// This enables syzkaller to create a race condition which in certain cases doesn't
 	// allow the phone to finalize initialization.
 	// To determine whether a system has booted and started all system processes and
@@ -410,12 +412,12 @@ func (inst *instance) runScript(script string) error {
 	// Execute the contents of the script.
 	contents, err := os.ReadFile(script)
 	if err != nil {
-		return fmt.Errorf("unable to read %s: %v", script, err)
+		return fmt.Errorf("unable to read %s: %w", script, err)
 	}
 	c := string(contents)
 	output, err := osutil.RunCmd(5*time.Minute, "", "sh", "-c", c)
 	if err != nil {
-		return fmt.Errorf("failed to execute %s: %v", script, err)
+		return fmt.Errorf("failed to execute %s: %w", script, err)
 	}
 	log.Logf(2, "adb: execute %s output\n%s", script, output)
 	log.Logf(2, "adb: done executing %s", script)
@@ -428,7 +430,7 @@ func (inst *instance) waitForSSH() error {
 	}
 
 	if _, err := inst.adbWithTimeout(10*time.Minute, "wait-for-device"); err != nil {
-		return fmt.Errorf("instance is dead and unrepairable: %v", err)
+		return fmt.Errorf("instance is dead and unrepairable: %w", err)
 	}
 
 	return nil
@@ -484,8 +486,9 @@ func (inst *instance) getBatteryLevel(numRetry int) (int, error) {
 	return val, nil
 }
 
-func (inst *instance) Close() {
+func (inst *instance) Close() error {
 	close(inst.closed)
+	return nil
 }
 
 func (inst *instance) Copy(hostSrc string) (string, error) {
@@ -493,6 +496,7 @@ func (inst *instance) Copy(hostSrc string) (string, error) {
 	if _, err := inst.adb("push", hostSrc, vmDst); err != nil {
 		return "", err
 	}
+	inst.adb("shell", "chmod", "+x", vmDst)
 	return vmDst, nil
 }
 
@@ -539,7 +543,7 @@ func (inst *instance) Run(timeout time.Duration, stop <-chan bool, command strin
 		tty.Close()
 		adbRpipe.Close()
 		adbWpipe.Close()
-		return nil, nil, fmt.Errorf("failed to start adb: %v", err)
+		return nil, nil, fmt.Errorf("failed to start adb: %w", err)
 	}
 	adbWpipe.Close()
 
@@ -551,7 +555,13 @@ func (inst *instance) Run(timeout time.Duration, stop <-chan bool, command strin
 	merger.Add("console", tty)
 	merger.Add("adb", adbRpipe)
 
-	return vmimpl.Multiplex(adb, merger, tty, timeout, stop, inst.closed, inst.debug)
+	return vmimpl.Multiplex(adb, merger, timeout, vmimpl.MultiplexConfig{
+		Console: tty,
+		Stop:    stop,
+		Close:   inst.closed,
+		Debug:   inst.debug,
+		Scale:   inst.timeouts.Scale,
+	})
 }
 
 func (inst *instance) Diagnose(rep *report.Report) ([]byte, bool) {

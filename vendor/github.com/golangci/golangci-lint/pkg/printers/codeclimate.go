@@ -1,9 +1,7 @@
 package printers
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 
 	"github.com/golangci/golangci-lint/pkg/result"
@@ -14,9 +12,10 @@ const defaultCodeClimateSeverity = "critical"
 // CodeClimateIssue is a subset of the Code Climate spec.
 // https://github.com/codeclimate/platform/blob/master/spec/analyzers/SPEC.md#data-types
 // It is just enough to support GitLab CI Code Quality.
-// https://docs.gitlab.com/ee/user/project/merge_requests/code_quality.html
+// https://docs.gitlab.com/ee/ci/testing/code_quality.html#implement-a-custom-tool
 type CodeClimateIssue struct {
 	Description string `json:"description"`
+	CheckName   string `json:"check_name"`
 	Severity    string `json:"severity,omitempty"`
 	Fingerprint string `json:"fingerprint"`
 	Location    struct {
@@ -35,12 +34,15 @@ func NewCodeClimate(w io.Writer) *CodeClimate {
 	return &CodeClimate{w: w}
 }
 
-func (p CodeClimate) Print(ctx context.Context, issues []result.Issue) error {
+func (p CodeClimate) Print(issues []result.Issue) error {
 	codeClimateIssues := make([]CodeClimateIssue, 0, len(issues))
+
 	for i := range issues {
 		issue := &issues[i]
+
 		codeClimateIssue := CodeClimateIssue{}
 		codeClimateIssue.Description = issue.Description()
+		codeClimateIssue.CheckName = issue.FromLinter
 		codeClimateIssue.Location.Path = issue.Pos.Filename
 		codeClimateIssue.Location.Lines.Begin = issue.Pos.Line
 		codeClimateIssue.Fingerprint = issue.Fingerprint()
@@ -53,14 +55,5 @@ func (p CodeClimate) Print(ctx context.Context, issues []result.Issue) error {
 		codeClimateIssues = append(codeClimateIssues, codeClimateIssue)
 	}
 
-	outputJSON, err := json.Marshal(codeClimateIssues)
-	if err != nil {
-		return err
-	}
-
-	_, err = fmt.Fprint(p.w, string(outputJSON))
-	if err != nil {
-		return err
-	}
-	return nil
+	return json.NewEncoder(p.w).Encode(codeClimateIssues)
 }

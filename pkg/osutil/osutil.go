@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +18,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	_ "unsafe" // required to use go:linkname
 )
 
 const (
@@ -43,7 +46,7 @@ func Run(timeout time.Duration, cmd *exec.Cmd) ([]byte, error) {
 	}
 	setPdeathsig(cmd, true)
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("failed to start %v %+v: %v", cmd.Path, cmd.Args, err)
+		return nil, fmt.Errorf("failed to start %v %+v: %w", cmd.Path, cmd.Args, err)
 	}
 	done := make(chan bool)
 	timedout := make(chan bool, 1)
@@ -66,8 +69,9 @@ func Run(timeout time.Duration, cmd *exec.Cmd) ([]byte, error) {
 		if <-timedout {
 			text = fmt.Sprintf("timedout after %v %q", timeout, cmd.Args)
 		}
-		exitCode := 0
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		exitCode := cmd.ProcessState.ExitCode()
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
 			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
 				exitCode = status.ExitStatus()
 			}
@@ -120,12 +124,13 @@ func (err *VerboseError) Error() string {
 }
 
 func PrependContext(ctx string, err error) error {
-	switch err1 := err.(type) {
-	case *VerboseError:
-		err1.Title = fmt.Sprintf("%v: %v", ctx, err1.Title)
-		return err1
+	var verboseError *VerboseError
+	switch {
+	case errors.As(err, &verboseError):
+		verboseError.Title = fmt.Sprintf("%v: %v", ctx, verboseError.Title)
+		return verboseError
 	default:
-		return fmt.Errorf("%v: %v", ctx, err)
+		return fmt.Errorf("%v: %w", ctx, err)
 	}
 }
 
@@ -147,7 +152,7 @@ func IsAccessible(name string) error {
 	}
 	f, err := os.Open(name)
 	if err != nil {
-		return fmt.Errorf("%v can't be opened (%v)", name, err)
+		return fmt.Errorf("%v can't be opened (%w)", name, err)
 	}
 	f.Close()
 	return nil
@@ -157,7 +162,7 @@ func IsAccessible(name string) error {
 func IsWritable(name string) error {
 	f, err := os.OpenFile(name, os.O_WRONLY, DefaultFilePerm)
 	if err != nil {
-		return fmt.Errorf("%v can't be written (%v)", name, err)
+		return fmt.Errorf("%v can't be written (%w)", name, err)
 	}
 	f.Close()
 	return nil
@@ -275,6 +280,14 @@ func WriteFile(filename string, data []byte) error {
 	return os.WriteFile(filename, data, DefaultFilePerm)
 }
 
+func WriteJSON[T any](filename string, obj T) error {
+	jsonData, err := json.MarshalIndent(obj, "", "\t")
+	if err != nil {
+		return fmt.Errorf("failed to marshal: %w", err)
+	}
+	return WriteFile(filename, jsonData)
+}
+
 func WriteGzipStream(filename string, reader io.Reader) error {
 	f, err := os.Create(filename)
 	if err != nil {
@@ -297,7 +310,7 @@ func WriteExecFile(filename string, data []byte) error {
 func TempFile(prefix string) (string, error) {
 	f, err := os.CreateTemp("", prefix)
 	if err != nil {
-		return "", fmt.Errorf("failed to create temp file: %v", err)
+		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
 	f.Close()
 	return f.Name(), nil
@@ -329,8 +342,28 @@ func Abs(path string) string {
 	if wd1, err := os.Getwd(); err == nil && wd1 != wd {
 		panic(fmt.Sprintf("wd changed: %q -> %q", wd, wd1))
 	}
-	if path == "" || filepath.IsAbs(path) {
+	if path == "" {
 		return path
 	}
-	return filepath.Join(wd, path)
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(wd, path)
+	}
+	return filepath.Clean(path)
 }
+
+// CreationTime returns file creation time.
+// May return zero time, if not known.
+func CreationTime(fi os.FileInfo) time.Time {
+	return creationTime(fi)
+}
+
+// MonotonicNano returns monotonic time in nanoseconds from some unspecified point in time.
+// Useful mostly to measure time intervals.
+// This function should be used inside of tested VMs b/c time.Now may reject to use monotonic time
+// if the fuzzer messes with system time (sets time past Y2157, see comments in time/time.go).
+// This is a hacky way to use the private runtime function.
+// If this ever breaks, we can either provide specializations for different Go versions
+// using build tags, or fall back to time.Now.
+//
+//go:linkname MonotonicNano runtime.nanotime
+func MonotonicNano() time.Duration

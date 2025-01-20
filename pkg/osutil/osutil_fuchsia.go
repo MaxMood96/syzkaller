@@ -2,7 +2,6 @@
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 //go:build fuchsia
-// +build fuchsia
 
 package osutil
 
@@ -10,7 +9,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"time"
 )
+
+func creationTime(fi os.FileInfo) time.Time {
+	return time.Time{}
+}
 
 func HandleInterrupts(shutdown chan struct{}) {
 }

@@ -48,8 +48,8 @@ func FuzzDeserialize(data []byte) int {
 	if !bytes.Equal(data0, p3.Serialize()) {
 		panic("got different data")
 	}
-	if n, err := p0.SerializeForExec(fuzzBuffer); err == nil {
-		if _, err := fuzzTarget.DeserializeExec(fuzzBuffer[:n]); err != nil {
+	if prodData, err := p0.SerializeForExec(); err == nil {
+		if _, err := fuzzTarget.DeserializeExec(prodData, nil); err != nil {
 			panic(err)
 		}
 	}
@@ -58,15 +58,13 @@ func FuzzDeserialize(data []byte) int {
 }
 
 func FuzzParseLog(data []byte) int {
-	if len(fuzzTarget.ParseLog(data)) != 0 {
+	if len(fuzzTarget.ParseLog(data, prog.NonStrict)) != 0 {
 		return 1
 	}
 	return 0
 }
 
-var fuzzBuffer = make([]byte, prog.ExecBufferSize)
 var fuzzTarget, fuzzChoiceTable = func() (*prog.Target, *prog.ChoiceTable) {
-	prog.Debug()
 	target, err := prog.GetTarget(targets.TestOS, targets.TestArch64)
 	if err != nil {
 		panic(err)

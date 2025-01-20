@@ -446,7 +446,7 @@ func checkNetlinkStruct(locs map[string]*ast.Struct, symbols map[string][]symbol
 		binary := make([]byte, symb.Size)
 		addr := symb.Addr - rodata.Addr
 		if _, err := rodata.ReadAt(binary, int64(addr)); err != nil {
-			return nil, fmt.Errorf("failed to read policy %v (%v) at %v: %v",
+			return nil, fmt.Errorf("failed to read policy %v (%v) at %v: %w",
 				kernelName, name, symb.Addr, err)
 		}
 		policy := (*[1e6]nlaPolicy)(unsafe.Pointer(&binary[0]))[:symb.Size/int(unsafe.Sizeof(nlaPolicy{}))]
@@ -726,7 +726,7 @@ func attrSize(policy nlaPolicy) (int, int, int) {
 	return -1, -1, -1
 }
 
-func typeMinMaxValue(payload prog.Type) (min, max uint64, ok bool) {
+func typeMinMaxValue(payload prog.Type) (minVal, maxVal uint64, ok bool) {
 	switch typ := payload.(type) {
 	case *prog.ConstType:
 		return typ.Val, typ.Val, true
@@ -736,16 +736,12 @@ func typeMinMaxValue(payload prog.Type) (min, max uint64, ok bool) {
 		}
 		return 0, ^uint64(0), true
 	case *prog.FlagsType:
-		min, max := ^uint64(0), uint64(0)
+		minVal, maxVal := ^uint64(0), uint64(0)
 		for _, v := range typ.Vals {
-			if min > v {
-				min = v
-			}
-			if max < v {
-				max = v
-			}
+			minVal = min(minVal, v)
+			maxVal = max(maxVal, v)
 		}
-		return min, max, true
+		return minVal, maxVal, true
 	}
 	return 0, 0, false
 }

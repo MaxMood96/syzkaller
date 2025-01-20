@@ -113,7 +113,7 @@ func (t *SyzManagerTarget) NewJob(slotName string, checkouts []*Checkout) (*Chec
 	t.nextInstanceID++
 	t.mu.Unlock()
 	uniqName := fmt.Sprintf("%s-%d", checkout.Name, instanceID)
-	instance, err := t.newSyzManagerInstance(slotName, uniqName, checkout)
+	instance, err := t.newSyzManagerInstance(slotName, uniqName, t.config.ManagerMode, checkout)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -133,7 +133,7 @@ func (t *SyzManagerTarget) SaveStatView(view StatView, dir string) error {
 	benchDir := filepath.Join(dir, "benches")
 	err := osutil.MkdirAll(benchDir)
 	if err != nil {
-		return fmt.Errorf("failed to create %s: %s", benchDir, err)
+		return fmt.Errorf("failed to create %s: %w", benchDir, err)
 	}
 	tableStats := map[string]func(view StatView) (*Table, error){
 		"bugs.csv":           (StatView).GenerateBugTable,
@@ -174,7 +174,7 @@ type SyzReproInput struct {
 func (inp *SyzReproInput) QueryTitle(checkout *Checkout, dupsMap map[string]int) error {
 	data, err := os.ReadFile(inp.Path)
 	if err != nil {
-		return fmt.Errorf("failed to read: %s", err)
+		return fmt.Errorf("failed to read: %w", err)
 	}
 	report := checkout.GetReporter().Parse(data)
 	if report == nil {

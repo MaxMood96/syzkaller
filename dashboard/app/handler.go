@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,7 +16,6 @@ import (
 	"time"
 
 	"github.com/google/syzkaller/pkg/html"
-	"golang.org/x/net/context"
 	"google.golang.org/appengine/v2"
 	"google.golang.org/appengine/v2/log"
 	"google.golang.org/appengine/v2/user"
@@ -33,14 +33,23 @@ func handleContext(fn contextHandler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c := appengine.NewContext(r)
 		c = context.WithValue(c, &currentURLKey, r.URL.RequestURI())
+		authorizedUser, _ := userAccessLevel(currentUser(c), "", getConfig(c))
+		if !authorizedUser {
+			if !throttleRequest(c, w, r) {
+				return
+			}
+			defer backpressureRobots(c, r)()
+		}
 		if err := fn(c, w, r); err != nil {
 			hdr := commonHeaderRaw(c, r)
 			data := &struct {
-				Header *uiHeader
-				Error  string
+				Header  *uiHeader
+				Error   string
+				TraceID string
 			}{
-				Header: hdr,
-				Error:  err.Error(),
+				Header:  hdr,
+				Error:   err.Error(),
+				TraceID: strings.Join(r.Header["X-Cloud-Trace-Context"], " "),
 			}
 			if err == ErrAccess {
 				if hdr.LoginLink != "" {
@@ -50,21 +59,13 @@ func handleContext(fn contextHandler) http.Handler {
 				http.Error(w, "403 Forbidden", http.StatusForbidden)
 				return
 			}
-			if redir, ok := err.(ErrRedirect); ok {
+			var redir *ErrRedirect
+			if errors.As(err, &redir) {
 				http.Redirect(w, r, redir.Error(), http.StatusFound)
 				return
 			}
 
-			status := http.StatusInternalServerError
-			logf := log.Errorf
-			var clientError *ErrClient
-			if errors.As(err, &clientError) {
-				// We don't log these as errors because they can be provoked
-				// by invalid user requests, so we don't wan't to pollute error log.
-				logf = log.Warningf
-				status = clientError.HTTPStatus()
-			}
-			logf(c, "%v", err)
+			status := logErrorPrepareStatus(c, err)
 			w.WriteHeader(status)
 			if err1 := templates.ExecuteTemplate(w, "error.html", data); err1 != nil {
 				combinedError := fmt.Sprintf("got err \"%v\" processing ExecuteTemplate() for err \"%v\"", err1, err)
@@ -72,6 +73,89 @@ func handleContext(fn contextHandler) http.Handler {
 			}
 		}
 	})
+}
+
+func logErrorPrepareStatus(c context.Context, err error) int {
+	status := http.StatusInternalServerError
+	logf := log.Errorf
+	var clientError *ErrClient
+	if errors.As(err, &clientError) {
+		// We don't log these as errors because they can be provoked
+		// by invalid user requests, so we don't wan't to pollute error log.
+		logf = log.Warningf
+		status = clientError.HTTPStatus()
+	}
+	logf(c, "appengine error: %v", err)
+	return status
+}
+
+func isRobot(r *http.Request) bool {
+	userAgent := strings.ToLower(strings.Join(r.Header["User-Agent"], " "))
+	if strings.HasPrefix(userAgent, "curl") ||
+		strings.HasPrefix(userAgent, "wget") {
+		return true
+	}
+	return false
+}
+
+// We don't count the request round trip time here.
+// Actual delay will be the minDelay + requestRoundTripTime.
+func backpressureRobots(c context.Context, r *http.Request) func() {
+	if !isRobot(r) {
+		return func() {}
+	}
+	cfg := getConfig(c).Throttle
+	if cfg.Empty() {
+		return func() {}
+	}
+	minDelay := cfg.Window / time.Duration(cfg.Limit)
+	delayUntil := time.Now().Add(minDelay)
+	return func() {
+		select {
+		case <-c.Done():
+		case <-time.After(time.Until(delayUntil)):
+		}
+	}
+}
+
+func throttleRequest(c context.Context, w http.ResponseWriter, r *http.Request) bool {
+	// AppEngine removes all App Engine-specific headers, which include
+	// X-Appengine-User-IP and X-Forwarded-For.
+	// https://cloud.google.com/appengine/docs/standard/reference/request-headers?tab=python#removed_headers
+	ip := r.Header.Get("X-Appengine-User-IP")
+	if ip == "" {
+		ip = r.Header.Get("X-Forwarded-For")
+		ip, _, _ = strings.Cut(ip, ",") // X-Forwarded-For is a comma-delimited list.
+		ip = strings.TrimSpace(ip)
+	}
+	cron := r.Header.Get("X-Appengine-Cron") != ""
+	if ip == "" || cron {
+		log.Infof(c, "cannot throttle request from %q, cron %t", ip, cron)
+		return true
+	}
+	accept, err := ThrottleRequest(c, ip)
+	if errors.Is(err, ErrThrottleTooManyRetries) {
+		// We get these at peak QPS anyway, it's not an error.
+		log.Warningf(c, "failed to throttle: %v", err)
+	} else if err != nil {
+		log.Errorf(c, "failed to throttle: %v", err)
+	}
+	log.Infof(c, "throttling for %q: %t", ip, accept)
+	if !accept {
+		http.Error(w, throttlingErrorMessage(c), http.StatusTooManyRequests)
+		return false
+	}
+	return true
+}
+
+func throttlingErrorMessage(c context.Context) string {
+	ret := fmt.Sprintf("429 Too Many Requests\nAllowed rate is %d requests per %d seconds.",
+		getConfig(c).Throttle.Limit, int(getConfig(c).Throttle.Window.Seconds()))
+	email := getConfig(c).ContactEmail
+	if email == "" {
+		return ret
+	}
+	return fmt.Sprintf("%s\nPlease contact us at %s if you need access to our data.", ret, email)
 }
 
 var currentURLKey = "the URL of the HTTP request in context"
@@ -104,7 +188,7 @@ func (ce *ErrClient) HTTPStatus() int {
 
 func handleAuth(fn contextHandler) contextHandler {
 	return func(c context.Context, w http.ResponseWriter, r *http.Request) error {
-		if err := checkAccessLevel(c, r, config.AccessLevel); err != nil {
+		if err := checkAccessLevel(c, r, getConfig(c).AccessLevel); err != nil {
 			return err
 		}
 		return fn(c, w, r)
@@ -129,8 +213,10 @@ type uiHeader struct {
 	Namespace           string
 	ContactEmail        string
 	BugCounts           *CachedBugStats
+	MissingBackports    int
 	Namespaces          []uiNamespace
 	ShowSubsystems      bool
+	ShowCoverageMenu    bool
 }
 
 type uiNamespace struct {
@@ -146,8 +232,8 @@ func commonHeaderRaw(c context.Context, r *http.Request) *uiHeader {
 	h := &uiHeader{
 		Admin:               accessLevel(c, r) == AccessAdmin,
 		URLPath:             r.URL.Path,
-		AnalyticsTrackingID: config.AnalyticsTrackingID,
-		ContactEmail:        config.ContactEmail,
+		AnalyticsTrackingID: getConfig(c).AnalyticsTrackingID,
+		ContactEmail:        getConfig(c).ContactEmail,
 	}
 	if user.Current(c) == nil {
 		h.LoginLink, _ = user.LoginURL(c, r.URL.String())
@@ -170,7 +256,7 @@ func commonHeader(c context.Context, r *http.Request, w http.ResponseWriter, ns 
 	const adminPage = "admin"
 	isAdminPage := r.URL.Path == "/"+adminPage
 	found := false
-	for ns1, cfg := range config.Namespaces {
+	for ns1, cfg := range getConfig(c).Namespaces {
 		if accessLevel < cfg.AccessLevel {
 			if ns1 == ns {
 				return nil, ErrAccess
@@ -180,7 +266,7 @@ func commonHeader(c context.Context, r *http.Request, w http.ResponseWriter, ns 
 		if ns1 == ns {
 			found = true
 		}
-		if cfg.Decommissioned {
+		if getNsConfig(c, ns1).Decommissioned {
 			continue
 		}
 		h.Namespaces = append(h.Namespaces, uiNamespace{
@@ -193,20 +279,20 @@ func commonHeader(c context.Context, r *http.Request, w http.ResponseWriter, ns 
 	})
 	cookie := decodeCookie(r)
 	if !found {
-		ns = config.DefaultNamespace
-		if cfg := config.Namespaces[cookie.Namespace]; cfg != nil && cfg.AccessLevel <= accessLevel {
+		ns = getConfig(c).DefaultNamespace
+		if cfg := getNsConfig(c, cookie.Namespace); cfg != nil && cfg.AccessLevel <= accessLevel {
 			ns = cookie.Namespace
 		}
 		if accessLevel == AccessAdmin {
 			ns = adminPage
 		}
 		if ns != adminPage || !isAdminPage {
-			return nil, ErrRedirect{fmt.Errorf("/%v", ns)}
+			return nil, &ErrRedirect{fmt.Errorf("/%v", ns)}
 		}
 	}
 	if ns != adminPage {
 		h.Namespace = ns
-		h.ShowSubsystems = getSubsystemService(c, ns) != nil
+		h.ShowSubsystems = getNsConfig(c, ns).Subsystems.Service != nil
 		cookie.Namespace = ns
 		encodeCookie(w, cookie)
 		cached, err := CacheGet(c, r, ns)
@@ -214,6 +300,8 @@ func commonHeader(c context.Context, r *http.Request, w http.ResponseWriter, ns 
 			return nil, err
 		}
 		h.BugCounts = &cached.Total
+		h.MissingBackports = cached.MissingBackports
+		h.ShowCoverageMenu = getNsConfig(c, ns).Coverage != nil
 	}
 	return h, nil
 }

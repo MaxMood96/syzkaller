@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/google/syzkaller/executor"
 	"github.com/google/syzkaller/pkg/testutil"
 	"github.com/google/syzkaller/prog"
 	_ "github.com/google/syzkaller/sys"
@@ -90,7 +91,7 @@ func testTarget(t *testing.T, target *prog.Target, full bool) {
 		opts = allOptionsSingle(target.OS)
 		opts = append(opts, ExecutorOpts)
 	} else {
-		minimized, _ := prog.Minimize(syzProg, -1, false, func(p *prog.Prog, call int) bool {
+		minimized, _ := prog.Minimize(syzProg, -1, prog.MinimizeCorpus, func(p *prog.Prog, call int) bool {
 			return len(p.Calls) == len(syzProg.Calls)
 		})
 		p.Calls = append(p.Calls, minimized.Calls...)
@@ -139,7 +140,7 @@ func testOne(t *testing.T, p *prog.Prog, opts Options) {
 		if atomic.AddUint32(&failedTests, 1) > maxFailures {
 			t.Fatal()
 		}
-		t.Logf("opts: %+v\nprogram:\n%s\n", opts, p.Serialize())
+		t.Logf("opts: %+v\nprogram:\n%s", opts, p.Serialize())
 		t.Fatalf("%v", err)
 	}
 	bin, err := Build(p.Target, src)
@@ -147,7 +148,7 @@ func testOne(t *testing.T, p *prog.Prog, opts Options) {
 		if atomic.AddUint32(&failedTests, 1) > maxFailures {
 			t.Fatal()
 		}
-		t.Logf("opts: %+v\nprogram:\n%s\n", opts, p.Serialize())
+		t.Logf("opts: %+v\nprogram:\n%s", opts, p.Serialize())
 		t.Fatalf("%v", err)
 	}
 	defer os.Remove(bin)
@@ -163,7 +164,7 @@ func TestExecutorMacros(t *testing.T) {
 	expected["SYZ_HAVE_RESET_LOOP"] = true
 	expected["SYZ_HAVE_SETUP_TEST"] = true
 	expected["SYZ_TEST_COMMON_EXT_EXAMPLE"] = true
-	macros := regexp.MustCompile("SYZ_[A-Za-z0-9_]+").FindAllString(commonHeader, -1)
+	macros := regexp.MustCompile("SYZ_[A-Za-z0-9_]+").FindAllString(string(executor.CommonHeader), -1)
 	for _, macro := range macros {
 		if strings.HasPrefix(macro, "SYZ_HAVE_") {
 			continue
@@ -223,6 +224,24 @@ syscall(SYS_csource6, /*buf=*/0x%xul);
 				target.DataOffset+0x100, target.DataOffset+0x100,
 				target.DataOffset+0x140, target.DataOffset+0x140),
 		},
+		{
+			input: `
+csource7(0x0)
+csource7(0x1)
+csource7(0x2)
+csource7(0x3)
+csource7(0x4)
+csource7(0x5)
+`,
+			output: `
+syscall(SYS_csource7, /*flag=*/0ul);
+syscall(SYS_csource7, /*flag=BIT_0*/1ul);
+syscall(SYS_csource7, /*flag=BIT_1*/2ul);
+syscall(SYS_csource7, /*flag=BIT_0_AND_1*/3ul);
+syscall(SYS_csource7, /*flag=*/4ul);
+syscall(SYS_csource7, /*flag=BIT_0|0x4*/5ul);
+`,
+		},
 	}
 	for i, test := range tests {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
@@ -231,6 +250,7 @@ syscall(SYS_csource6, /*buf=*/0x%xul);
 				t.Fatal(err)
 			}
 			ctx := &context{
+				p:         p,
 				target:    target,
 				sysTarget: targets.Get(target.OS, target.Arch),
 			}

@@ -10,43 +10,81 @@ import (
 	"bytes"
 	"fmt"
 	"go/ast"
+	"go/scanner"
 	"go/token"
 	"go/types"
+	"os"
+	pathpkg "path"
 	"strconv"
-)
 
-// DiagnoseFuzzTests controls whether the 'tests' analyzer diagnoses fuzz tests
-// in Go 1.18+.
-var DiagnoseFuzzTests bool = false
+	"golang.org/x/tools/go/analysis"
+)
 
 func TypeErrorEndPos(fset *token.FileSet, src []byte, start token.Pos) token.Pos {
 	// Get the end position for the type error.
-	offset, end := fset.PositionFor(start, false).Offset, start
-	if offset >= len(src) {
-		return end
+	file := fset.File(start)
+	if file == nil {
+		return start
 	}
-	if width := bytes.IndexAny(src[offset:], " \n,():;[]+-*"); width > 0 {
-		end = start + token.Pos(width)
+	if offset := file.PositionFor(start, false).Offset; offset > len(src) {
+		return start
+	} else {
+		src = src[offset:]
+	}
+
+	// Attempt to find a reasonable end position for the type error.
+	//
+	// TODO(rfindley): the heuristic implemented here is unclear. It looks like
+	// it seeks the end of the primary operand starting at start, but that is not
+	// quite implemented (for example, given a func literal this heuristic will
+	// return the range of the func keyword).
+	//
+	// We should formalize this heuristic, or deprecate it by finally proposing
+	// to add end position to all type checker errors.
+	//
+	// Nevertheless, ensure that the end position at least spans the current
+	// token at the cursor (this was golang/go#69505).
+	end := start
+	{
+		var s scanner.Scanner
+		fset := token.NewFileSet()
+		f := fset.AddFile("", fset.Base(), len(src))
+		s.Init(f, src, nil /* no error handler */, scanner.ScanComments)
+		pos, tok, lit := s.Scan()
+		if tok != token.SEMICOLON && token.Pos(f.Base()) <= pos && pos <= token.Pos(f.Base()+f.Size()) {
+			off := file.Offset(pos) + len(lit)
+			src = src[off:]
+			end += token.Pos(off)
+		}
+	}
+
+	// Look for bytes that might terminate the current operand. See note above:
+	// this is imprecise.
+	if width := bytes.IndexAny(src, " \n,():;[]+-*/"); width > 0 {
+		end += token.Pos(width)
 	}
 	return end
 }
 
 func ZeroValue(f *ast.File, pkg *types.Package, typ types.Type) ast.Expr {
-	under := typ
-	if n, ok := typ.(*types.Named); ok {
+	// TODO(adonovan): think about generics, and also generic aliases.
+	under := types.Unalias(typ)
+	// Don't call Underlying unconditionally: although it removes
+	// Named and Alias, it also removes TypeParam.
+	if n, ok := under.(*types.Named); ok {
 		under = n.Underlying()
 	}
-	switch u := under.(type) {
+	switch under := under.(type) {
 	case *types.Basic:
 		switch {
-		case u.Info()&types.IsNumeric != 0:
+		case under.Info()&types.IsNumeric != 0:
 			return &ast.BasicLit{Kind: token.INT, Value: "0"}
-		case u.Info()&types.IsBoolean != 0:
+		case under.Info()&types.IsBoolean != 0:
 			return &ast.Ident{Name: "false"}
-		case u.Info()&types.IsString != 0:
+		case under.Info()&types.IsString != 0:
 			return &ast.BasicLit{Kind: token.STRING, Value: `""`}
 		default:
-			panic("unknown basic type")
+			panic(fmt.Sprintf("unknown basic type %v", under))
 		}
 	case *types.Chan, *types.Interface, *types.Map, *types.Pointer, *types.Signature, *types.Slice, *types.Array:
 		return ast.NewIdent("nil")
@@ -155,6 +193,10 @@ func TypeExpr(f *ast.File, pkg *types.Package, typ types.Type) ast.Expr {
 				},
 			})
 		}
+		if t.Variadic() {
+			last := params[len(params)-1]
+			last.Type = &ast.Ellipsis{Elt: last.Type.(*ast.ArrayType).Elt}
+		}
 		var returns []*ast.Field
 		for i := 0; i < t.Results().Len(); i++ {
 			r := TypeExpr(f, pkg, t.Results().At(i).Type())
@@ -173,7 +215,7 @@ func TypeExpr(f *ast.File, pkg *types.Package, typ types.Type) ast.Expr {
 				List: returns,
 			},
 		}
-	case *types.Named:
+	case interface{ Obj() *types.TypeName }: // *types.{Alias,Named,TypeParam}
 		if t.Obj().Pkg() == nil {
 			return ast.NewIdent(t.Obj().Name())
 		}
@@ -262,6 +304,8 @@ func StmtToInsertVarBefore(path []ast.Node) ast.Stmt {
 		if expr.Init == enclosingStmt || expr.Post == enclosingStmt {
 			return expr
 		}
+	case *ast.SwitchStmt, *ast.TypeSwitchStmt:
+		return expr.(ast.Stmt)
 	}
 	return enclosingStmt.(ast.Stmt)
 }
@@ -387,4 +431,116 @@ func equivalentTypes(want, got types.Type) bool {
 		}
 	}
 	return types.AssignableTo(want, got)
+}
+
+// MakeReadFile returns a simple implementation of the Pass.ReadFile function.
+func MakeReadFile(pass *analysis.Pass) func(filename string) ([]byte, error) {
+	return func(filename string) ([]byte, error) {
+		if err := CheckReadable(pass, filename); err != nil {
+			return nil, err
+		}
+		return os.ReadFile(filename)
+	}
+}
+
+// CheckReadable enforces the access policy defined by the ReadFile field of [analysis.Pass].
+func CheckReadable(pass *analysis.Pass, filename string) error {
+	if slicesContains(pass.OtherFiles, filename) ||
+		slicesContains(pass.IgnoredFiles, filename) {
+		return nil
+	}
+	for _, f := range pass.Files {
+		if pass.Fset.File(f.FileStart).Name() == filename {
+			return nil
+		}
+	}
+	return fmt.Errorf("Pass.ReadFile: %s is not among OtherFiles, IgnoredFiles, or names of Files", filename)
+}
+
+// TODO(adonovan): use go1.21 slices.Contains.
+func slicesContains[S ~[]E, E comparable](slice S, x E) bool {
+	for _, elem := range slice {
+		if elem == x {
+			return true
+		}
+	}
+	return false
+}
+
+// AddImport checks whether this file already imports pkgpath and
+// that import is in scope at pos. If so, it returns the name under
+// which it was imported and a zero edit. Otherwise, it adds a new
+// import of pkgpath, using a name derived from the preferred name,
+// and returns the chosen name along with the edit for the new import.
+//
+// It does not mutate its arguments.
+func AddImport(info *types.Info, file *ast.File, pos token.Pos, pkgpath, preferredName string) (name string, newImport []analysis.TextEdit) {
+	// Find innermost enclosing lexical block.
+	scope := info.Scopes[file].Innermost(pos)
+	if scope == nil {
+		panic("no enclosing lexical block")
+	}
+
+	// Is there an existing import of this package?
+	// If so, are we in its scope? (not shadowed)
+	for _, spec := range file.Imports {
+		pkgname, ok := importedPkgName(info, spec)
+		if ok && pkgname.Imported().Path() == pkgpath {
+			if _, obj := scope.LookupParent(pkgname.Name(), pos); obj == pkgname {
+				return pkgname.Name(), nil
+			}
+		}
+	}
+
+	// We must add a new import.
+	// Ensure we have a fresh name.
+	newName := preferredName
+	for i := 0; ; i++ {
+		if _, obj := scope.LookupParent(newName, pos); obj == nil {
+			break // fresh
+		}
+		newName = fmt.Sprintf("%s%d", preferredName, i)
+	}
+
+	// For now, keep it real simple: create a new import
+	// declaration before the first existing declaration (which
+	// must exist), including its comments, and let goimports tidy it up.
+	//
+	// Use a renaming import whenever the preferred name is not
+	// available, or the chosen name does not match the last
+	// segment of its path.
+	newText := fmt.Sprintf("import %q\n\n", pkgpath)
+	if newName != preferredName || newName != pathpkg.Base(pkgpath) {
+		newText = fmt.Sprintf("import %s %q\n\n", newName, pkgpath)
+	}
+	decl0 := file.Decls[0]
+	var before ast.Node = decl0
+	switch decl0 := decl0.(type) {
+	case *ast.GenDecl:
+		if decl0.Doc != nil {
+			before = decl0.Doc
+		}
+	case *ast.FuncDecl:
+		if decl0.Doc != nil {
+			before = decl0.Doc
+		}
+	}
+	return newName, []analysis.TextEdit{{
+		Pos:     before.Pos(),
+		End:     before.Pos(),
+		NewText: []byte(newText),
+	}}
+}
+
+// importedPkgName returns the PkgName object declared by an ImportSpec.
+// TODO(adonovan): use go1.22's Info.PkgNameOf.
+func importedPkgName(info *types.Info, imp *ast.ImportSpec) (*types.PkgName, bool) {
+	var obj types.Object
+	if imp.Name != nil {
+		obj = info.Defs[imp.Name]
+	} else {
+		obj = info.Implicits[imp]
+	}
+	pkgname, ok := obj.(*types.PkgName)
+	return pkgname, ok
 }
