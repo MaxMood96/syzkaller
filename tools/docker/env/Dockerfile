@@ -4,7 +4,7 @@
 # See /tools/docker/README.md for details.
 
 # Build Python2 in a separate container to facilitate caching.
-FROM debian:bookworm AS python2-builder
+FROM debian:12.11 AS python2-builder
 
 RUN apt-get update --allow-releaseinfo-change
 RUN DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
@@ -15,7 +15,7 @@ RUN cd /tmp/Python-2.7.18 && ./configure --prefix=/python2/
 RUN cd /tmp/Python-2.7.18 && make -j4 && make altinstall
 
 # Construct a /syzkaller folder.
-FROM debian:bookworm as syzkaller-folder
+FROM debian:12.11 as syzkaller-folder
 WORKDIR /syzkaller
 RUN apt-get update --allow-releaseinfo-change
 RUN DEBIAN_FRONTEND=noninteractive apt-get install -y -q curl
@@ -56,7 +56,7 @@ RUN curl https://storage.googleapis.com/syzkaller/fuchsia-toolchain.tar.gz | tar
 RUN curl https://storage.googleapis.com/syzkaller/netbsd-toolchain.tar.gz | tar -C /syzkaller -xz
 
 # Now build the actual syz-env container.
-FROM debian:bookworm
+FROM debian:12.11
 
 LABEL homepage="https://github.com/google/syzkaller"
 
